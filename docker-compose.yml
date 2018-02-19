@@ -1,0 +1,97 @@
+version: '3.4'
+
+volumes:
+  dbdata:
+  s3images:
+  wiki:
+
+services:
+
+  backup-mediawiki-images:
+    environment:
+      - ACCESS_KEY=${AWS_ACCESS_KEY_ID}
+      - BUCKET_LOCATION=us-east-1
+      - 'CRON_SCHEDULE=*/30 * * * * '
+      - DESTINATION_PATH=${S3_IMAGES_PATH}
+      - SECRET_KEY=${AWS_SECRET_ACCESS_KEY}
+      - SOURCE_PATH=/var/www/mediawiki/images/
+    image: 'silintl/sync-with-s3:latest'
+    volumes:
+      - "s3images:/var/www/mediawiki/images/:ro"
+
+  db:
+    command: "-c \"while [ ! -f /docker-entrypoint-initdb.d/latest.sql.gz ]; do echo 'Waiting for database bootstrap...'; sleep 1; done && docker-entrypoint.sh mysqld\""
+    entrypoint: /bin/bash
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_PASSWORD}
+    image: 'mysql:latest'
+    restart: always
+    volumes:
+      - "dbdata:/docker-entrypoint-initdb.d"
+
+  dbbackup:
+    environment:
+      - MULTI_FILES=yes
+      - MYSQLDUMP_DATABASE=${MYSQL_DB_NAME}
+      - MYSQL_HOST=db
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_USER=${MYSQL_USER}
+      - S3_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - S3_BUCKET=${S3_WIKI_BUCKET}
+      - S3_PREFIX=backup
+      - S3_REGION=us-east-1
+      - S3_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - SCHEDULE=@every 6h
+    image: 'schickling/mysql-backup-s3:latest'
+    restart: always
+
+  dbrestore:
+    command: "cp s3://${S3_WIKI_BUCKET}/backup/latest.sql.gz /docker-entrypoint-initdb.d/latest.sql.gz"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    image: 'quay.io/chiefy/alpine-s3:1.0.1'
+    volumes:
+      - "dbdata:/docker-entrypoint-initdb.d"
+
+  mediawiki:
+    command: preStart
+    entrypoint: /usr/local/bin/manage.sh
+    environment:
+      - 'SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}'
+      - WIKI_DB_NAME=${MYSQL_DB_NAME}
+      - WIKI_DB_PASSWORD=${MYSQL_PASSWORD}
+      - WIKI_DB_USER=${MYSQL_USER}
+      - WIKI_NAME=${WIKI_NAME}
+      - WIKI_SECRET_KEY=asdfasdfasdfasdffdsafdsafdasfdsa
+      - WIKI_UPGRADE_KEY=asdfasdfasdfasdffdsafdsafdasfdsa
+      - WIKI_URL=${WIKI_URL}
+    image: 'chiefy/tdsmediawiki:latest'
+    restart: always
+    volumes:
+      - "wiki:/var/www/mediawiki"
+      - "s3images:/var/www/mediawiki/images"
+
+  s3images:
+    environment:
+      - ACCESS_KEY=${AWS_ACCESS_KEY_ID}
+      - DATA_PATH=/var/www/mediawiki/images/
+      - OWNER_GID=0
+      - OWNER_UID=100
+      - 'S3_PATH=${S3_IMAGES_PATH}'
+      - SECRET_KEY=${AWS_SECRET_ACCESS_KEY}
+    image: 'amsdard/s3-sync:latest'
+    restart: always
+    volumes:
+      - "s3images:/var/www/mediawiki/images"
+
+  www:
+    image: 'chiefy/tdsnginx:latest'
+    links:
+      - mediawiki
+    ports:
+      - '80:80'
+    restart: always
+    volumes:
+      - "wiki:/var/www/mediawiki"
+      - "s3images:/var/www/mediawiki/images"
